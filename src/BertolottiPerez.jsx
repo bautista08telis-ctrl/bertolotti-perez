@@ -13,8 +13,6 @@ import {
   MapPin,
   Menu,
   MessageCircle,
-  Pause,
-  Play,
   RotateCcw,
   ShieldCheck,
   Sparkles,
@@ -153,164 +151,90 @@ function GoogleRatingStars() {
 export default function BertolottiPerez() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState(false);
-  const [activeZoneId, setActiveZoneId] = useState('motor');
-  const [checkedCount, setCheckedCount] = useState(0);
-  const [mode, setMode] = useState('intro'); // 'intro' | 'patrol' | 'manual'
-  const [paused, setPaused] = useState(false);
-  const [sliderPct, setSliderPct] = useState(0);
+  const [introStage, setIntroStage] = useState('parking'); // 'parking' | 'scanning' | 'ready'
+  const [passedCount, setPassedCount] = useState(0);
+  const [scanCycle, setScanCycle] = useState(0);
 
   const stageRef = useRef(null);
-  const rangeRef = useRef(null);
-  const scanPctRef = useRef(0);
-  const checkedRef = useRef(0);
-  const draggingRef = useRef(false);
-  const patrolDirRef = useRef(-1); // Después del intro en 100%, barre suavemente hacia la izquierda
+  const passedRef = useRef(0);
 
-  const activeZone = SCAN_ZONES.find((z) => z.id === activeZoneId) || SCAN_ZONES[0];
-
-  const applyScanPosition = useCallback((pct, syncSlider = false) => {
-    const clamped = Math.max(0, Math.min(100, pct));
-    scanPctRef.current = clamped;
-    if (stageRef.current) {
-      stageRef.current.style.setProperty('--scan-num', clamped.toFixed(2));
-      stageRef.current.style.setProperty('--scan-pct', `${clamped.toFixed(2)}%`);
-    }
-    if (rangeRef.current) {
-      rangeRef.current.value = String(Math.round(clamped));
-    }
-    if (syncSlider) {
-      setSliderPct(Math.round(clamped));
-    }
+  const applyScanWindow = useCallback((leadPct, trailPct) => {
+    if (!stageRef.current) return;
+    stageRef.current.style.setProperty('--scan-lead-num', leadPct.toFixed(2));
+    stageRef.current.style.setProperty('--scan-lead', `${leadPct.toFixed(2)}%`);
+    stageRef.current.style.setProperty('--scan-trail', `${trailPct.toFixed(2)}%`);
   }, []);
 
-  // Respetar preferencia de movimiento reducido al montar
+  // Secuencia única al cargar (o al pulsar "Repetir escaneo"):
+  // Acto 1: Auto estaciona (~1.1s) -> Acto 2: Escaneo X-Ray único (~2.0s) -> Acto 3: Hero del taller
   useEffect(() => {
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
     if (mq.matches) {
-      applyScanPosition(56, true);
-      checkedRef.current = SCAN_ZONES.length;
-      setCheckedCount(SCAN_ZONES.length);
-      setMode('manual');
-      setPaused(true);
+      passedRef.current = SCAN_ZONES.length;
+      setPassedCount(SCAN_ZONES.length);
+      applyScanWindow(100, 100);
+      setIntroStage('ready');
+      return undefined;
     }
-  }, [applyScanPosition]);
 
-  // Motor rAF sin re-renders por frame (solo actualiza CSS variables en el DOM)
-  useEffect(() => {
-    if (paused || mode === 'manual') return undefined;
+    passedRef.current = 0;
+    setPassedCount(0);
+    applyScanWindow(0, 0);
+    setIntroStage('parking');
 
     let rafId = 0;
-    let lastTime = performance.now();
+    const parkTimer = window.setTimeout(() => {
+      setIntroStage('scanning');
+      let progress = 0;
+      let lastTime = performance.now();
 
-    const step = (now) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.05);
-      lastTime = now;
+      const step = (now) => {
+        const dt = Math.min((now - lastTime) / 1000, 0.05);
+        lastTime = now;
+        progress += dt * 64; // 0 -> 134 en ~2.1s
 
-      if (mode === 'intro') {
-        const next = scanPctRef.current + dt * 24; // 0 -> 100% en ~4.15s
-        if (next >= 100) {
-          applyScanPosition(100, true);
-          checkedRef.current = SCAN_ZONES.length;
-          setCheckedCount(SCAN_ZONES.length);
-          setActiveZoneId(SCAN_ZONES[SCAN_ZONES.length - 1].id);
-          patrolDirRef.current = -1;
-          setMode('patrol');
-          return;
-        }
-
-        applyScanPosition(next);
+        const lead = Math.min(100, progress);
+        const trail = Math.max(0, Math.min(100, progress - 34));
+        applyScanWindow(lead, trail);
 
         let passed = 0;
         for (let i = 0; i < SCAN_ZONES.length; i += 1) {
-          if (next >= SCAN_ZONES[i].xPct) passed = i + 1;
+          if (lead >= SCAN_ZONES[i].xPct) passed = i + 1;
         }
-        if (passed > checkedRef.current) {
-          checkedRef.current = passed;
-          setCheckedCount(passed);
-          setActiveZoneId(SCAN_ZONES[passed - 1].id);
+        if (passed > passedRef.current) {
+          passedRef.current = passed;
+          setPassedCount(passed);
         }
-      } else if (mode === 'patrol') {
-        let next = scanPctRef.current + patrolDirRef.current * dt * 15;
-        if (next <= 12) {
-          next = 12;
-          patrolDirRef.current = 1;
-        } else if (next >= 88) {
-          next = 88;
-          patrolDirRef.current = -1;
+
+        if (progress >= 134) {
+          applyScanWindow(100, 100);
+          passedRef.current = SCAN_ZONES.length;
+          setPassedCount(SCAN_ZONES.length);
+          setIntroStage('ready');
+          return;
         }
-        applyScanPosition(next);
-      }
+
+        rafId = requestAnimationFrame(step);
+      };
 
       rafId = requestAnimationFrame(step);
+    }, 1100);
+
+    return () => {
+      window.clearTimeout(parkTimer);
+      cancelAnimationFrame(rafId);
     };
+  }, [applyScanWindow, scanCycle]);
 
-    rafId = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(rafId);
-  }, [applyScanPosition, mode, paused]);
-
-  const handleRestartScan = () => {
-    checkedRef.current = 0;
-    setCheckedCount(0);
-    setActiveZoneId('motor');
-    applyScanPosition(0, true);
-    setPaused(false);
-    setMode('intro');
+  const handleSkipIntro = () => {
+    passedRef.current = SCAN_ZONES.length;
+    setPassedCount(SCAN_ZONES.length);
+    applyScanWindow(100, 100);
+    setIntroStage('ready');
   };
 
-  const handleTogglePause = () => {
-    if (paused) {
-      setPaused(false);
-      if (mode === 'manual') {
-        setMode('patrol');
-      }
-    } else {
-      setPaused(true);
-      setSliderPct(Math.round(scanPctRef.current));
-    }
-  };
-
-  const handleSelectZone = (zone) => {
-    setActiveZoneId(zone.id);
-    checkedRef.current = SCAN_ZONES.length;
-    setCheckedCount(SCAN_ZONES.length);
-    setMode('manual');
-    setPaused(true);
-    applyScanPosition(Math.min(96, zone.xPct + 4), true);
-  };
-
-  const updateFromPointer = (clientX) => {
-    if (!stageRef.current) return;
-    const rect = stageRef.current.getBoundingClientRect();
-    if (!rect.width) return;
-    const pct = ((clientX - rect.left) / rect.width) * 100;
-    checkedRef.current = SCAN_ZONES.length;
-    setCheckedCount(SCAN_ZONES.length);
-    setMode('manual');
-    setPaused(true);
-    applyScanPosition(pct, true);
-
-    // Resalta el componente más cercano al puntero
-    let nearest = SCAN_ZONES[0];
-    let minDiff = Infinity;
-    for (const z of SCAN_ZONES) {
-      const diff = Math.abs(z.xPct - pct);
-      if (diff < minDiff) {
-        minDiff = diff;
-        nearest = z;
-      }
-    }
-    if (nearest.id !== activeZoneId) {
-      setActiveZoneId(nearest.id);
-    }
-  };
-
-  const handleRangeChange = (e) => {
-    const val = Number(e.target.value);
-    checkedRef.current = SCAN_ZONES.length;
-    setCheckedCount(SCAN_ZONES.length);
-    setMode('manual');
-    setPaused(true);
-    applyScanPosition(val, true);
+  const handleReplayIntro = () => {
+    setScanCycle((prev) => prev + 1);
   };
 
   const handleCopyPhone = async () => {
@@ -322,13 +246,6 @@ export default function BertolottiPerez() {
       setCopiedPhone(false);
     }
   };
-
-  const hudStatusText =
-    mode === 'intro' && !paused
-      ? `Escaneando ${activeZone.shortLabel.toLowerCase()}…`
-      : mode === 'manual' || paused
-        ? `Inspección manual · ${activeZone.shortLabel}`
-        : 'Escaneo completo · Patrulla activa';
 
   return (
     <MotionConfig reducedMotion="user">
@@ -453,104 +370,187 @@ export default function BertolottiPerez() {
           </header>
 
           <main id="contenido" className="relative z-10 mx-auto max-w-6xl px-4 sm:px-6 pb-20">
-            {/* 2. Hero Section + Escáner Automotriz X-Ray de Inicio */}
+            {/* 2. Hero Section: Intro Única (Estaciona + Escaneo X-Ray) -> Taller Mecánico */}
             <section
               id="diagnostico"
               aria-labelledby="hero-title"
-              className="pt-3 sm:pt-4 pb-12 sm:pb-16 scroll-mt-24"
+              className="pt-5 sm:pt-7 pb-10 sm:pb-14 scroll-mt-24"
             >
-              <m.div
-                initial={{ opacity: 0, y: 18 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-                className={`${GLASS_PANEL} rounded-[28px] p-3.5 sm:p-5 relative overflow-hidden`}
-              >
-                {/* Cabecera HUD del escáner */}
-                <div className="flex flex-wrap items-center justify-between gap-2.5 mb-3 sm:mb-4">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      aria-hidden="true"
-                      className={`h-2 w-2 shrink-0 rounded-full ${
-                        paused && mode === 'manual'
-                          ? 'bg-[#22D3EE]'
-                          : 'bg-[#06B6D4] shadow-[0_0_10px_#06B6D4]'
-                      }`}
-                    />
-                    <p className="text-[11px] sm:text-xs font-medium tracking-[0.06em] uppercase text-[#A1A1A6] truncate">
-                      Escáner Automotriz X-Ray · Maldonado
-                    </p>
+              {/* Zona superior de altura estable (grid stack -> cero saltos CLS al revelar el titular) */}
+              <div className="grid place-items-center max-w-3xl mx-auto">
+                {/* Capa A: Titular principal del Taller Mecánico (se revela tras el escaneo único) */}
+                <div
+                  aria-hidden={introStage !== 'ready'}
+                  className={`col-start-1 row-start-1 w-full text-center transition-all duration-700 ease-out ${
+                    introStage === 'ready'
+                      ? 'opacity-100 translate-y-0'
+                      : 'opacity-0 translate-y-3 pointer-events-none select-none'
+                  }`}
+                >
+                  <div className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] border border-white/15 px-3.5 py-1.5 text-xs font-medium text-[#22D3EE]">
+                    <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Taller Mecánico · Chapa y Pintura · Maldonado</span>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="hidden md:inline-block text-xs text-[#A1A1A6] tabular-nums mr-1">
-                      {hudStatusText}
+                  <h1
+                    id="hero-title"
+                    className="mt-4 text-3xl sm:text-5xl md:text-[50px] font-semibold tracking-[-0.025em] leading-[1.06] text-[#FBFBFD]"
+                  >
+                    Precisión tecnológica. Respaldo absoluto.
+                  </h1>
+
+                  <p className="mt-3.5 text-base sm:text-lg leading-relaxed text-[#86868B] max-w-2xl mx-auto">
+                    Servicio integral de mecánica, chapa y pintura en Maldonado. Más de{' '}
+                    <span className="text-[#FBFBFD] font-medium tabular-nums">290</span> clientes
+                    avalan nuestra calidad.
+                  </p>
+
+                  <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3.5">
+                    <a
+                      href="#servicios"
+                      tabIndex={introStage === 'ready' ? 0 : -1}
+                      className={`inline-flex items-center justify-center gap-2 min-h-[48px] rounded-full bg-[#2563EB] hover:bg-[#1D4ED8] border border-[#3B82F6]/60 shadow-[0_0_28px_rgba(59,130,246,0.38)] px-7 text-[15px] font-medium text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
+                    >
+                      <span>Diagnosticar mi vehículo</span>
+                      <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                    </a>
+
+                    <a
+                      href={WHATSAPP_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      tabIndex={introStage === 'ready' ? 0 : -1}
+                      className={`${GLASS_PANEL} inline-flex items-center justify-center gap-2 min-h-[48px] rounded-full px-7 text-[15px] font-medium text-[#FBFBFD] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
+                    >
+                      <MessageCircle className="h-4 w-4 text-[#22D3EE]" aria-hidden="true" />
+                      <span>WhatsApp Directo</span>
+                    </a>
+                  </div>
+
+                  <div className="mt-5 flex flex-col sm:flex-row flex-wrap items-center justify-center gap-x-5 gap-y-1 text-xs text-[#A1A1A6]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-[#FBBF24]" aria-hidden="true">
+                        ★
+                      </span>
+                      <strong className="text-[#FBFBFD] font-medium tabular-nums">4.5</strong> en
+                      Google (290 reseñas)
                     </span>
-
-                    <button
-                      type="button"
-                      onClick={handleRestartScan}
-                      className={`inline-flex items-center gap-1.5 min-h-[36px] rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 px-3 text-xs font-medium text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
-                    >
-                      <RotateCcw className="h-3.5 w-3.5 text-[#22D3EE]" aria-hidden="true" />
-                      <span>Reescanear</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      aria-pressed={paused}
-                      onClick={handleTogglePause}
-                      className={`inline-flex items-center gap-1.5 min-h-[36px] rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 px-3 text-xs font-medium text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
-                    >
-                      {paused ? (
-                        <>
-                          <Play className="h-3.5 w-3.5 text-[#22D3EE]" aria-hidden="true" />
-                          <span>Reanudar</span>
-                        </>
-                      ) : (
-                        <>
-                          <Pause className="h-3.5 w-3.5 text-[#22D3EE]" aria-hidden="true" />
-                          <span>Pausar</span>
-                        </>
-                      )}
-                    </button>
+                    <span aria-hidden="true" className="hidden sm:inline text-white/20">
+                      ·
+                    </span>
+                    <span>Mecánica Avanzada, Chapa y Pintura</span>
+                    <span aria-hidden="true" className="hidden sm:inline text-white/20">
+                      ·
+                    </span>
+                    <span>19 de Abril 1024, Maldonado</span>
                   </div>
                 </div>
 
-                {/* Escenario Dual-Layer X-Ray (arrastrable en desktop y táctil) */}
+                {/* Capa B: Estado breve durante el ingreso y escaneo único de apertura */}
+                <div
+                  aria-hidden={introStage === 'ready'}
+                  className={`col-start-1 row-start-1 w-full flex flex-col items-center justify-center text-center transition-all duration-500 ${
+                    introStage === 'ready'
+                      ? 'opacity-0 scale-[0.98] pointer-events-none select-none'
+                      : 'opacity-100 scale-100'
+                  }`}
+                >
+                  <div
+                    className={`${GLASS_PANEL} rounded-full px-4 py-2 inline-flex items-center gap-2.5 text-xs font-medium text-[#FBFBFD]`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="h-2 w-2 rounded-full bg-[#06B6D4] shadow-[0_0_10px_#06B6D4]"
+                    />
+                    <span>
+                      {introStage === 'parking'
+                        ? 'Ingresando vehículo a bahía de servicio…'
+                        : 'Escaneando motor, frenos, chasis y electrónica…'}
+                    </span>
+                  </div>
+
+                  <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-2 w-full max-w-xl">
+                    {SCAN_ZONES.map((zone, idx) => {
+                      const done = idx < passedCount;
+                      return (
+                        <div
+                          key={`intro-${zone.id}`}
+                          className={`rounded-2xl border px-3 py-2 text-xs font-medium flex items-center justify-between gap-2 transition-all duration-300 ${
+                            done
+                              ? 'bg-[#06B6D4]/15 border-[#22D3EE]/70 text-[#FBFBFD] shadow-[0_0_18px_rgba(6,182,212,0.22)]'
+                              : 'bg-white/[0.03] border-white/10 text-[#86868B]'
+                          }`}
+                        >
+                          <span className="truncate">{zone.shortLabel}</span>
+                          {done ? (
+                            <Check className="h-3.5 w-3.5 text-[#22D3EE] shrink-0" aria-hidden="true" />
+                          ) : (
+                            <span className="text-[10px]">…</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    tabIndex={introStage === 'ready' ? -1 : 0}
+                    onClick={handleSkipIntro}
+                    className={`mt-5 min-h-[36px] rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 px-4 text-xs font-medium text-[#A1A1A6] hover:text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
+                  >
+                    Saltar intro
+                  </button>
+                </div>
+              </div>
+
+              {/* Bahía de servicio minimalista integrada al fondo oscuro */}
+              <div className="mt-5 sm:mt-6 relative max-w-[780px] mx-auto">
+                {/* Barra LED cenital sutil de bahía de taller */}
+                <div
+                  aria-hidden="true"
+                  className="mx-auto mb-1 h-[1px] w-2/3 bg-gradient-to-r from-transparent via-[#22D3EE]/50 to-transparent shadow-[0_0_24px_rgba(6,182,212,0.4)]"
+                />
+
                 <div
                   ref={stageRef}
-                  style={{ '--scan-num': '0', '--scan-pct': '0%' }}
-                  onPointerDown={(e) => {
-                    if (e.target.closest('button')) return;
-                    draggingRef.current = true;
-                    e.currentTarget.setPointerCapture?.(e.pointerId);
-                    updateFromPointer(e.clientX);
-                  }}
-                  onPointerMove={(e) => {
-                    if (!draggingRef.current) return;
-                    updateFromPointer(e.clientX);
-                  }}
-                  onPointerUp={() => {
-                    draggingRef.current = false;
-                  }}
-                  onPointerCancel={() => {
-                    draggingRef.current = false;
-                  }}
-                  className="relative w-full max-w-[820px] aspect-[18/7] mx-auto rounded-2xl overflow-hidden bg-[#050507] border border-white/10 cursor-ew-resize select-none touch-pan-y"
+                  style={{ '--scan-lead-num': '0', '--scan-lead': '0%', '--scan-trail': '0%' }}
+                  className="relative w-full aspect-[18/7] overflow-hidden select-none"
                 >
-                  {/* Capa base: fotografía de estudio exterior */}
-                  <img
-                    src={MEDIA.carExterior}
-                    alt="Vehículo sedán deportivo en estudio oscuro de diagnóstico"
-                    width={1440}
-                    height={560}
-                    loading="eager"
-                    decoding="async"
-                    draggable={false}
-                    className="absolute inset-0 h-full w-full object-cover object-center pointer-events-none"
-                  />
+                  {/* Vehículo estacionando una sola vez desde la derecha */}
+                  <m.div
+                    key={scanCycle}
+                    initial={{ x: '24%', opacity: 0.25 }}
+                    animate={{ x: '0%', opacity: 1 }}
+                    transition={{ duration: 1.08, ease: [0.16, 1, 0.3, 1] }}
+                    className="relative h-full w-full"
+                  >
+                    <img
+                      src={MEDIA.carExterior}
+                      alt="Vehículo en bahía de diagnóstico automotriz de Bertolotti & Pérez"
+                      width={1440}
+                      height={560}
+                      loading="eager"
+                      decoding="async"
+                      draggable={false}
+                      className="h-full w-full object-cover object-center pointer-events-none"
+                    />
 
-                  {/* Capa X-Ray revelada por la posición --scan-pct del láser */}
+                    {/* Destello breve de faro delantero y luz de freno durante el estacionamiento */}
+                    {introStage === 'parking' && (
+                      <>
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute left-0 top-[54%] h-[22%] w-[18%] bg-gradient-to-l from-[#E0F2FE]/25 via-[#22D3EE]/10 to-transparent blur-md"
+                        />
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute right-[5.4%] top-[46%] h-4 w-7 rounded-full bg-red-500/80 blur-md"
+                        />
+                      </>
+                    )}
+                  </m.div>
+
+                  {/* Ventana X-Ray viajera (visible únicamente durante el barrido único) */}
                   <img
                     src={MEDIA.carXray}
                     alt=""
@@ -561,21 +561,46 @@ export default function BertolottiPerez() {
                     decoding="async"
                     draggable={false}
                     style={{
-                      clipPath: 'inset(0 calc(100% - var(--scan-pct, 0%)) 0 0)',
+                      clipPath:
+                        'inset(0 calc(100% - var(--scan-lead, 0%)) 0 var(--scan-trail, 0%))',
                     }}
-                    className="absolute inset-0 h-full w-full object-cover object-center pointer-events-none"
+                    className={`absolute inset-0 h-full w-full object-cover object-center pointer-events-none transition-opacity duration-300 ${
+                      introStage === 'scanning' ? 'opacity-100' : 'opacity-0'
+                    }`}
                   />
 
-                  {/* Resplandor ambiental sutil detrás de la línea de corte */}
+                  {/* Puntos breves de escaneo durante la pasada */}
+                  {introStage === 'scanning' &&
+                    SCAN_ZONES.map((zone, idx) => {
+                      const active = idx < passedCount;
+                      return (
+                        <div
+                          key={`dot-${zone.id}`}
+                          aria-hidden="true"
+                          style={{ left: `${zone.xPct}%`, top: `${zone.yPct}%` }}
+                          className={`-translate-x-1/2 -translate-y-1/2 pointer-events-none absolute flex items-center gap-1.5 transition-opacity duration-300 ${
+                            active ? 'opacity-100' : 'opacity-0'
+                          }`}
+                        >
+                          <span className="h-2.5 w-2.5 rounded-full bg-[#22D3EE] shadow-[0_0_16px_#06B6D4] ring-4 ring-[#06B6D4]/25" />
+                          <span className="hidden sm:inline-block rounded-full bg-neutral-950/85 border border-[#22D3EE]/50 px-2 py-0.5 text-[10px] font-medium text-[#FBFBFD] whitespace-nowrap">
+                            {zone.shortLabel}
+                          </span>
+                        </div>
+                      );
+                    })}
+
+                  {/* Haz láser cian (activo solo durante el escaneo único, luego desaparece) */}
                   <div
                     aria-hidden="true"
-                    className="pointer-events-none absolute inset-0"
+                    className={`pointer-events-none absolute inset-0 transition-opacity duration-300 ${
+                      introStage === 'scanning' ? 'opacity-100' : 'opacity-0'
+                    }`}
                     style={{
-                      transform: 'translate3d(calc(var(--scan-num, 0) * 1%), 0, 0)',
+                      transform: 'translate3d(calc(var(--scan-lead-num, 0) * 1%), 0, 0)',
                     }}
                   >
                     <div className="absolute inset-y-0 left-0 w-24 -translate-x-full bg-gradient-to-l from-[#06B6D4]/25 via-[#3B82F6]/10 to-transparent" />
-                    <div className="absolute inset-y-0 left-0 w-10 bg-gradient-to-r from-[#22D3EE]/15 to-transparent" />
                     <div
                       style={{
                         WebkitMaskImage:
@@ -587,178 +612,33 @@ export default function BertolottiPerez() {
                     />
                   </div>
 
-                  {/* Puntos interactivos sobre las zonas reales del vehículo */}
-                  {SCAN_ZONES.map((zone, idx) => {
-                    const checked = idx < checkedCount;
-                    const selected = activeZoneId === zone.id;
-                    return (
-                      <button
-                        key={zone.id}
-                        type="button"
-                        aria-label={`Inspeccionar ${zone.label}`}
-                        aria-pressed={selected}
-                        onClick={() => handleSelectZone(zone)}
-                        style={{ left: `${zone.xPct}%`, top: `${zone.yPct}%` }}
-                        className={`-translate-x-1/2 -translate-y-1/2 absolute z-20 group inline-flex items-center justify-center rounded-full p-2 transition-transform hover:scale-110 ${FOCUS_RING}`}
-                      >
-                        <span
-                          className={`relative flex h-5 w-5 sm:h-6 sm:w-6 items-center justify-center rounded-full border transition-all ${
-                            selected
-                              ? 'bg-[#06B6D4]/30 border-[#22D3EE] shadow-[0_0_22px_rgba(34,211,238,0.85)] scale-110'
-                              : checked
-                                ? 'bg-[#06B6D4]/20 border-[#22D3EE]/80 shadow-[0_0_14px_rgba(6,182,212,0.55)]'
-                                : 'bg-neutral-950/75 border-white/35'
-                          }`}
-                        >
-                          <span
-                            className={`h-2 w-2 rounded-full ${
-                              selected || checked ? 'bg-[#FBFBFD]' : 'bg-white/60'
-                            }`}
-                          />
-                        </span>
-                        <span
-                          className={`hidden md:inline-flex items-center gap-1.5 ml-2 rounded-full backdrop-blur-xl bg-neutral-950/85 border px-2.5 py-1 text-[11px] font-medium whitespace-nowrap transition-opacity ${
-                            selected
-                              ? 'border-[#22D3EE]/80 text-[#FBFBFD] opacity-100 shadow-[0_0_18px_rgba(6,182,212,0.3)]'
-                              : checked
-                                ? 'border-white/20 text-[#FBFBFD]/90 opacity-90'
-                                : 'border-white/15 text-[#A1A1A6] opacity-75 group-hover:opacity-100'
-                          }`}
-                        >
-                          {zone.shortLabel}
-                        </span>
-                      </button>
-                    );
-                  })}
-
-                  {/* Indicador discreto de interacción */}
-                  <div className="pointer-events-none absolute bottom-2.5 right-3 hidden sm:inline-flex items-center rounded-full backdrop-blur-md bg-neutral-950/70 border border-white/15 px-3 py-1 text-[11px] text-[#A1A1A6]">
-                    Arrastrá sobre el vehículo para inspeccionar
-                  </div>
-                </div>
-
-                {/* Deslizador accesible para dispositivos táctiles y teclado */}
-                <div className="mt-2.5 flex items-center gap-3 px-1">
-                  <label
-                    htmlFor="bp-xray-range"
-                    className="text-[11px] font-medium text-[#A1A1A6] whitespace-nowrap"
-                  >
-                    Barrido X-Ray
-                  </label>
-                  <input
-                    ref={rangeRef}
-                    id="bp-xray-range"
-                    type="range"
-                    min={0}
-                    max={100}
-                    defaultValue={0}
-                    onChange={handleRangeChange}
-                    aria-label="Control manual del escáner X-Ray sobre el vehículo"
-                    className={`w-full h-1.5 rounded-full bg-white/15 accent-[#06B6D4] cursor-pointer ${FOCUS_RING}`}
+                  {/* Viñeta sutil para fundir los bordes del estudio con #050507 */}
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_58%,#050507_98%)]"
                   />
-                  <span className="text-[11px] font-medium text-[#22D3EE] tabular-nums w-10 text-right">
-                    {mode !== 'manual' && !paused ? 'AUTO' : `${sliderPct}%`}
-                  </span>
                 </div>
 
-                {/* Checklist HUD de 4 subsistemas escaneados */}
-                <div className="mt-3 grid grid-cols-2 lg:grid-cols-4 gap-2">
-                  {SCAN_ZONES.map((zone, idx) => {
-                    const checked = idx < checkedCount;
-                    const selected = activeZoneId === zone.id;
-                    return (
-                      <button
-                        key={`hud-${zone.id}`}
-                        type="button"
-                        aria-pressed={selected}
-                        onClick={() => handleSelectZone(zone)}
-                        className={`min-h-[44px] rounded-2xl border px-3 py-2 text-left transition-all flex items-center justify-between gap-2 ${
-                          selected
-                            ? 'bg-[#06B6D4]/15 border-[#22D3EE]/80 shadow-[0_0_20px_rgba(6,182,212,0.2)]'
-                            : 'bg-white/[0.03] border-white/15 hover:bg-white/[0.07]'
-                        } ${FOCUS_RING}`}
-                      >
-                        <span className="flex items-center gap-2 min-w-0">
-                          <span
-                            aria-hidden="true"
-                            className={`h-2 w-2 shrink-0 rounded-full ${
-                              checked
-                                ? 'bg-[#22D3EE] shadow-[0_0_8px_#06B6D4]'
-                                : 'bg-white/25'
-                            }`}
-                          />
-                          <span className="text-xs font-medium text-[#FBFBFD] sm:hidden">
-                            {zone.shortLabel}
-                          </span>
-                          <span className="text-xs font-medium text-[#FBFBFD] hidden sm:inline truncate">
-                            {zone.label}
-                          </span>
-                        </span>
-                        <span
-                          className={`text-[11px] font-semibold shrink-0 ${
-                            checked ? 'text-[#22D3EE]' : 'text-[#86868B]'
-                          }`}
-                        >
-                          {checked ? zone.status : '—'}
-                        </span>
-                      </button>
-                    );
-                  })}
+                {/* Suelo fino del estudio */}
+                <div
+                  aria-hidden="true"
+                  className="h-[1px] w-full bg-gradient-to-r from-transparent via-white/15 to-transparent"
+                />
+
+                {/* Control discreto solo cuando finalizó la intro */}
+                <div className="mt-2 flex justify-end min-h-[28px]">
+                  {introStage === 'ready' && (
+                    <button
+                      type="button"
+                      onClick={handleReplayIntro}
+                      className={`inline-flex items-center gap-1.5 rounded-full bg-white/[0.04] hover:bg-white/[0.1] border border-white/15 px-3 py-1 text-[11px] font-medium text-[#A1A1A6] hover:text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
+                    >
+                      <RotateCcw className="h-3 w-3 text-[#22D3EE]" aria-hidden="true" />
+                      <span>Repetir escaneo</span>
+                    </button>
+                  )}
                 </div>
-
-                {/* Lectura detallada del subsistema enfocado */}
-                <div className="mt-2.5 pt-2.5 border-t border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 text-[#FBFBFD]">
-                    <span className="inline-flex items-center rounded-full bg-[#06B6D4]/15 border border-[#06B6D4]/40 px-2.5 py-0.5 text-[11px] font-semibold text-[#22D3EE]">
-                      {activeZone.status}
-                    </span>
-                    <span className="font-semibold">{activeZone.label}</span>
-                    <span className="hidden md:inline text-[#86868B]">—</span>
-                    <span className="hidden md:inline text-[#A1A1A6]">{activeZone.subsystem}</span>
-                  </div>
-                  <p className="text-[#A1A1A6]">{activeZone.detail}</p>
-                </div>
-              </m.div>
-
-              {/* Titular y CTAs estilo Apple debajo del Escáner X-Ray */}
-              <m.div
-                initial={{ opacity: 0, y: 14 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.45, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
-                className="mt-6 sm:mt-7 max-w-3xl mx-auto text-center"
-              >
-                <h1
-                  id="hero-title"
-                  className="text-3xl sm:text-5xl md:text-[46px] font-semibold tracking-[-0.025em] leading-[1.06] text-[#FBFBFD]"
-                >
-                  Precisión tecnológica. Respaldo absoluto.
-                </h1>
-                <p className="mt-3 text-base sm:text-lg leading-relaxed text-[#86868B] max-w-2xl mx-auto">
-                  Servicio integral de mecánica, chapa y pintura en Maldonado. Más de{' '}
-                  <span className="text-[#FBFBFD] font-medium tabular-nums">290</span> clientes avalan
-                  nuestra calidad.
-                </p>
-
-                <div className="mt-5 flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3.5">
-                  <a
-                    href="#servicios"
-                    className={`inline-flex items-center justify-center gap-2 min-h-[48px] rounded-full bg-[#2563EB] hover:bg-[#1D4ED8] border border-[#3B82F6]/60 shadow-[0_0_28px_rgba(59,130,246,0.38)] px-7 text-[15px] font-medium text-[#FBFBFD] transition-colors ${FOCUS_RING}`}
-                  >
-                    <span>Diagnosticar mi vehículo</span>
-                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                  </a>
-
-                  <a
-                    href={WHATSAPP_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`${GLASS_PANEL} inline-flex items-center justify-center gap-2 min-h-[48px] rounded-full px-7 text-[15px] font-medium text-[#FBFBFD] hover:bg-white/[0.1] transition-colors ${FOCUS_RING}`}
-                  >
-                    <MessageCircle className="h-4 w-4 text-[#22D3EE]" aria-hidden="true" />
-                    <span>WhatsApp Directo</span>
-                  </a>
-                </div>
-              </m.div>
+              </div>
             </section>
 
             {/* 3. Bento Grid de Servicios Automotrices con Fotografía Studio */}
@@ -796,7 +676,7 @@ export default function BertolottiPerez() {
                     />
                     <div
                       aria-hidden="true"
-                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/60 to-transparent"
+                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/45 to-transparent"
                     />
                     <div className="absolute top-5 left-6 right-6 flex items-center justify-between gap-3">
                       <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl backdrop-blur-xl bg-neutral-950/75 border border-white/20 text-[#22D3EE]">
@@ -870,7 +750,7 @@ export default function BertolottiPerez() {
                     />
                     <div
                       aria-hidden="true"
-                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/55 to-transparent"
+                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/45 to-transparent"
                     />
                     <div className="absolute top-4 left-6 right-6 flex items-center justify-between gap-3">
                       <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl backdrop-blur-xl bg-neutral-950/75 border border-white/20 text-[#22D3EE]">
@@ -924,7 +804,7 @@ export default function BertolottiPerez() {
                     />
                     <div
                       aria-hidden="true"
-                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/55 to-transparent"
+                      className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/45 to-transparent"
                     />
                     <div className="absolute top-4 left-6 right-6 flex items-center justify-between gap-3">
                       <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl backdrop-blur-xl bg-neutral-950/75 border border-white/20 text-[#22D3EE]">
